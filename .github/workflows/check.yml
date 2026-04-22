@@ -1,0 +1,19 @@
+name: Check site
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  html-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Confirm index.html exists
+        run: |
+          test -f index.html && echo "index.html found"
+          grep -q "<html" index.html && echo "Looks like valid HTML"
+
