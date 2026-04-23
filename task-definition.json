@@ -1,0 +1,30 @@
+{
+  "family": "static-site-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "REPLACED_AT_DEPLOY",
+  "containerDefinitions": [
+    {
+      "name": "web",
+      "image": "REPLACED_AT_DEPLOY",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 80,
+          "protocol": "tcp"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/static-site",
+          "awslogs-region": "REPLACED_AT_DEPLOY",
+          "awslogs-stream-prefix": "web",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

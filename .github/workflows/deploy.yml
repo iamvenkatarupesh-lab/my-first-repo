@@ -1,36 +1,84 @@
-name: Deploy to GitHub Pages
+name: Deploy to ECS
 
 on:
   push:
-    branches: [main]
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
+    branches: [ main ]
+  workflow_dispatch: {}
 
 jobs:
   deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
     steps:
-      - name: Check out code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          path: '.'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPO: ${{ secrets.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build -t "$REGISTRY/$REPO:$TAG" -t "$REGISTRY/$REPO:latest" .
+          docker push "$REGISTRY/$REPO:$TAG"
+          docker push "$REGISTRY/$REPO:latest"
+          echo "image=$REGISTRY/$REPO:$TAG" >> $GITHUB_OUTPUT
+
+      - name: Fill in task definition
+        id: td
+        run: |
+          jq --arg img "${{ steps.build.outputs.image }}" \
+             --arg role "${{ secrets.EXECUTION_ROLE_ARN }}" \
+             --arg region "${{ secrets.AWS_REGION }}" \
+             '.executionRoleArn=$role
+              | .containerDefinitions[0].image=$img
+              | .containerDefinitions[0].logConfiguration.options["awslogs-region"]=$region' \
+             task-definition.json > td-rendered.json
+          cat td-rendered.json
+
+      - name: Register new task definition
+        id: register
+        run: |
+          ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://td-rendered.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$ARN" >> $GITHUB_OUTPUT
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --service "${{ secrets.ECS_SERVICE }}" \
+            --task-definition "${{ steps.register.outputs.arn }}" \
+            --force-new-deployment
+
+      - name: Wait for service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --services "${{ secrets.ECS_SERVICE }}"
+
+      - name: Print public URL
+        run: |
+          TASK_ARN=$(aws ecs list-tasks --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --service-name "${{ secrets.ECS_SERVICE }}" --query 'taskArns[0]' --output text)
+          ENI=$(aws ecs describe-tasks --cluster "${{ secrets.ECS_CLUSTER }}" --tasks "$TASK_ARN" \
+            --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text)
+          IP=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI" \
+            --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
+          echo "Site is live at: http://$IP"
+          echo "::notice title=Site URL::http://$IP"
